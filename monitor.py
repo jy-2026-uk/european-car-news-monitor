@@ -4,7 +4,7 @@ import json
 import hashlib
 import requests
 import feedparser
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict
 from dataclasses import dataclass
 from collections import defaultdict
@@ -14,6 +14,12 @@ from collections import defaultdict
 @dataclass
 class Config:
     FEISHU_WEBHOOK = os.environ.get('FEISHU_WEBHOOK_URL', '')
+    DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', '')
+    AI_PROVIDER = 'deepseek'  # 使用DeepSeek
+    
+    # 时间配置：只取最近24小时的新闻
+    HOURS_BACK = 24
+    
     KEYWORDS_CORE = [
         'tariff', 'zoll', 'subsid', 'regulation', 'verordnung',
         'anti-subsidy', 'anti-dumping', 'import duty',
@@ -24,14 +30,14 @@ class Config:
         'layoff', 'entlassung', 'restructuring', 'factory', 'werk',
         'market share', 'marktanteil', 'sales', 'verkauf',
         'production', 'joint venture', 'partnership',
-        'battery', 'charging', 'europe', 'eu', 'german', 'deutschland', 'uk', 'united kingdom'
+        'battery', 'charging', 'europe', 'eu', 'german', 'deutschland', 'uk'
     ]
     EXCLUDE_PATTERNS = [
         r'formula\s*1', r'f1', r'racing', r'motorsport',
         r'crash\s*test', r'safety\s*rating', r'concept\s*car',
     ]
 
-# ==================== 日志打印 ====================
+# ==================== 日志 ====================
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
@@ -45,17 +51,170 @@ class NewsItem:
     summary: str
     source_name: str
     published: str
+    pub_datetime: datetime = None  # 解析后的时间
+    full_content: str = ""
     dimension: str = ""
     impact_summary: str = ""
     priority: int = 99
 
     def to_feishu_format(self, index: int) -> str:
-        """严格匹配用户要求的格式"""
         return f"""{index}. {self.title}
 新闻摘要：{self.impact_summary}
 来源网站：[{self.source_name}]({self.link})"""
 
-# ==================== 新闻获取 ====================
+# ==================== 时间解析器 ====================
+
+class TimeParser:
+    """解析各种时间格式"""
+    
+    @staticmethod
+    def parse(pub_date: str) -> datetime:
+        """尝试解析各种RSS时间格式"""
+        if not pub_date:
+            return datetime.now()
+        
+        formats = [
+            '%a, %d %b %Y %H:%M:%S %z',  # RFC 2822
+            '%a, %d %b %Y %H:%M:%S %Z',
+            '%Y-%m-%dT%H:%M:%S%z',       # ISO 8601
+            '%Y-%m-%dT%H:%M:%SZ',
+            '%Y-%m-%d %H:%M:%S',
+            '%d %b %Y %H:%M:%S %z',
+        ]
+        
+        for fmt in formats:
+            try:
+                return datetime.strptime(pub_date, fmt)
+            except:
+                continue
+        
+        # 如果都失败，返回当前时间（不过滤）
+        return datetime.now()
+
+# ==================== AI分析器 ====================
+
+class AIAnalyzer:
+    def __init__(self):
+        self.provider = Config.AI_PROVIDER
+        self.api_key = Config.DEEPSEEK_API_KEY
+        
+    def fetch_full_content(self, url: str) -> str:
+        """获取新闻全文"""
+        try:
+            jina_url = f"https://r.jina.ai/http://{url.replace('https://', '').replace('http://', '')}"
+            response = requests.get(jina_url, timeout=15)
+            if response.status_code == 200:
+                content = response.text[:2000]
+                return content
+        except Exception as e:
+            log(f"  ⚠️ 全文获取失败: {e}")
+        
+        return ""
+    
+    def analyze_with_ai(self, item: NewsItem) -> NewsItem:
+        """使用DeepSeek分析"""
+        if not self.api_key:
+            return self.analyze_with_rules(item)
+        
+        # 获取全文
+        item.full_content = self.fetch_full_content(item.link)
+        content = item.full_content if item.full_content else item.summary
+        
+        prompt = f"""你是一位专业的欧洲汽车产业分析师，专注于中国品牌出海战略研究。
+
+请分析以下新闻，提取核心事实并评估对中国汽车品牌出海欧洲的影响。
+
+新闻标题：{item.title}
+新闻来源：{item.source_name}
+发布时间：{item.published}
+新闻内容：{content}
+
+请严格按照以下JSON格式返回：
+{{
+  "dimension": "policy/competitor/market/brand/supply_chain/other",
+  "impact_summary": "50字以内，直接点明核心事实及其对出海的潜在影响",
+  "key_entities": ["涉及的关键公司/品牌"],
+  "importance_score": 1-10
+}}
+
+维度说明：
+- policy: 关税、补贴、准入、法规等政策监管
+- competitor: 大众/BMW/奔驰等竞品降价、裁员、建厂、战略调整
+- market: 销量榜单、市占率波动等市场表现  
+- brand: 中国品牌动态、深度测评、重大负面
+- supply_chain: 充电网络、电池、原材料等供应链
+
+影响摘要要求：
+- 必须50字以内
+- 直接点明核心事实
+- 明确指出对中国品牌出海的潜在影响
+- 具体、actionable，不要泛泛而谈"""
+
+        try:
+            result = self._call_deepseek(prompt)
+            
+            # 解析JSON
+            json_match = re.search(r'\{.*\}', result, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group())
+                item.dimension = data.get('dimension', 'other')
+                item.impact_summary = data.get('impact_summary', '')[:50]
+                
+                if len(item.impact_summary) < 10:
+                    item = self.analyze_with_rules(item)
+                
+                log(f"  ✨ AI: [{item.dimension}] {item.impact_summary[:40]}...")
+            else:
+                item = self.analyze_with_rules(item)
+                
+        except Exception as e:
+            log(f"  ⚠️ AI失败，使用规则: {e}")
+            item = self.analyze_with_rules(item)
+        
+        return item
+    
+    def _call_deepseek(self, prompt: str) -> str:
+        """调用DeepSeek API"""
+        response = requests.post(
+            "https://api.deepseek.com/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "deepseek-chat",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+                "max_tokens": 500
+            },
+            timeout=30
+        )
+        return response.json()['choices'][0]['message']['content']
+    
+    def analyze_with_rules(self, item: NewsItem) -> NewsItem:
+        """规则兜底"""
+        text = (item.title + " " + item.summary).lower()
+        
+        china_brands = ['byd', 'nio', 'xpeng', 'geely', 'saic', 'catl', 'mg']
+        has_china = any(x in text for x in china_brands)
+        
+        if has_china:
+            item.dimension = 'brand'
+        elif any(x in text for x in ['tariff', 'zoll', 'duty', 'regulation']):
+            item.dimension = 'policy'
+        elif any(x in text for x in ['layoff', 'entlassung', 'restructuring']):
+            item.dimension = 'competitor'
+        elif any(x in text for x in ['market share', 'sales', 'verkauf']):
+            item.dimension = 'market'
+        elif any(x in text for x in ['battery', 'charging']):
+            item.dimension = 'supply_chain'
+        else:
+            item.dimension = 'other'
+        
+        item.impact_summary = f"{item.summary[:40]}...（建议关注出海影响）"
+        return item
+
+# ==================== 新闻获取器 ====================
 
 class NewsFetcher:
     def __init__(self):
@@ -63,6 +222,9 @@ class NewsFetcher:
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
+        self.time_parser = TimeParser()
+        self.cutoff_time = datetime.now() - timedelta(hours=Config.HOURS_BACK)
+        
         self.sources = {
             'automobilwoche': 'https://www.automobilwoche.de/rss.xml',
             'acea': 'https://www.acea.auto/feed/',
@@ -71,6 +233,14 @@ class NewsFetcher:
             'google_german': 'https://news.google.com/rss/search?q=German+automotive+industry&hl=en&gl=DE&ceid=DE:en',
             'google_china_eu': 'https://news.google.com/rss/search?q=China+EV+Europe+tariff&hl=en&gl=DE&ceid=DE:en',
         }
+
+    def is_recent(self, pub_date: str) -> bool:
+        """检查是否在24小时内"""
+        pub_dt = self.time_parser.parse(pub_date)
+        # 转换为无时区比较
+        if pub_dt.tzinfo:
+            pub_dt = pub_dt.replace(tzinfo=None)
+        return pub_dt >= self.cutoff_time
 
     def should_exclude(self, title, summary):
         text = (title + " " + summary).lower()
@@ -81,13 +251,12 @@ class NewsFetcher:
 
     def has_keywords(self, title, summary):
         text = (title + " " + summary).lower()
-        found = [kw for kw in Config.KEYWORDS_CORE if kw in text]
-        return len(found) > 0
+        return any(kw in text for kw in Config.KEYWORDS_CORE)
 
     def get_priority(self, url):
         if 'automobilwoche' in url:
             return 1
-        elif 'acea' in url or 'vda' in url:
+        elif 'acea' in url:
             return 2
         elif 'auto-motor' in url:
             return 3
@@ -110,20 +279,26 @@ class NewsFetcher:
     def fetch_rss(self, name, url):
         items = []
         try:
-            log(f"📡 获取源: {name}")
+            log(f"📡 获取: {name}")
             feed = feedparser.parse(url)
-            log(f"  原始条目数: {len(feed.entries)}")
+            log(f"  原始条目: {len(feed.entries)}")
             
-            for entry in feed.entries[:10]:
+            recent_count = 0
+            for entry in feed.entries[:15]:  # 多取一些，因为有过滤
                 title = entry.get('title', '')
-                summary = entry.get('summary', '')[:300]
+                summary = entry.get('summary', '')[:400]
                 link = entry.get('link', '')
+                published = entry.get('published', '')
                 
-                # 排除检查
-                if self.should_exclude(title, summary):
+                # 时间过滤：只取24小时内
+                if not self.is_recent(published):
                     continue
                 
-                # 关键词检查
+                recent_count += 1
+                
+                # 内容过滤
+                if self.should_exclude(title, summary):
+                    continue
                 if not self.has_keywords(title, summary):
                     continue
                 
@@ -132,16 +307,18 @@ class NewsFetcher:
                     link=link,
                     summary=summary,
                     source_name=self.get_source_name(url),
-                    published=entry.get('published', ''),
+                    published=published,
+                    pub_datetime=self.time_parser.parse(published),
                     priority=self.get_priority(url)
                 )
                 items.append(item)
                 log(f"  ✨ 通过: {title[:50]}...")
+            
+            log(f"  24小时内: {recent_count} 条 | 通过筛选: {len(items)} 条")
                 
         except Exception as e:
-            log(f"❌ 获取失败 {name}: {e}")
+            log(f"❌ 失败 {name}: {e}")
         
-        log(f"  通过筛选: {len(items)} 条")
         return items
 
     def fetch_all(self):
@@ -149,94 +326,22 @@ class NewsFetcher:
         for name, url in self.sources.items():
             items = self.fetch_rss(name, url)
             all_items.extend(items)
-        log(f"\n📊 总计获取: {len(all_items)} 条")
+        
+        # 按时间排序，最新的在前
+        all_items.sort(key=lambda x: x.pub_datetime, reverse=True)
+        
+        log(f"\n📊 总计(24h内): {len(all_items)} 条")
         return all_items
-
-# ==================== 分析器 ====================
-
-class SimpleAnalyzer:
-    def analyze(self, item):
-        text = (item.title + " " + item.summary).lower()
-        
-        # 检查是否涉及中国品牌（优先级最高）
-        china_brands = ['byd', 'nio', 'xpeng', 'geely', 'saic', 'catl', 'mg', 'chinese brand', 'chinese ev', 'chinese automaker']
-        has_china_brand = any(x in text for x in china_brands)
-        
-        # 维度分类
-        if has_china_brand:
-            item.dimension = 'brand'
-        elif any(x in text for x in ['tariff', 'zoll', 'duty', 'regulation', 'verordnung', 'anti-dumping', 'eu commission', 'brussels', 'subsidy']):
-            item.dimension = 'policy'
-        elif any(x in text for x in ['layoff', 'entlassung', 'restructuring', 'restrukturierung', 'job cut', 'stellenabbau']):
-            item.dimension = 'competitor'
-        elif any(x in text for x in ['market share', 'marktanteil', 'sales figure', 'verkauf', 'absatz', 'delivery', 'zulassung', 'registration']):
-            item.dimension = 'market'
-        elif any(x in text for x in ['battery', 'batterie', 'charging', 'ladesäule', 'infrastructure', 'supply chain', 'lieferkette']):
-            item.dimension = 'supply_chain'
-        else:
-            item.dimension = 'other'
-        
-        # 生成影响摘要
-        item.impact_summary = self._generate_impact_summary(item, text, has_china_brand)
-        
-        return item
-    
-    def _generate_impact_summary(self, item, text, has_china_brand):
-        """生成准确的50字以内影响摘要"""
-        
-        # 中国品牌相关
-        if has_china_brand:
-            if 'catl' in text and 'bmw' in text:
-                return "宁德时代与宝马合作深化，中国供应链企业加速欧洲本土化布局。"
-            elif 'battery' in text or 'batterie' in text:
-                return "中国电池企业欧洲布局加速，供应链本土化趋势明显。"
-            else:
-                return "中国品牌欧洲市场动作频频，需关注其产品策略与渠道扩张。"
-        
-        # 政策相关
-        if 'tariff' in text or 'zoll' in text or 'anti-dumping' in text:
-            return "关税政策变化将直接影响出海成本，需评估定价策略与本土化生产。"
-        if 'regulation' in text or 'verordnung' in text or 'rule' in text:
-            return "欧盟监管规则调整，需评估合规成本与市场准入条件变化。"
-        if 'subsidy' in text or 'subvention' in text:
-            return "补贴政策变动将影响终端价格竞争力，关注政策走向。"
-        
-        # 竞品动态
-        if 'layoff' in text or 'entlassung' in text or 'job cut' in text:
-            return "传统车企人员调整，电动化转型阵痛持续，可能释放市场份额。"
-        if 'factory' in text or 'werk' in text or 'plant' in text:
-            if 'close' in text or 'schließung' in text:
-                return "竞品产能布局调整，关注其市场空缺与供应链重构机会。"
-            else:
-                return "欧洲本土产能投资动态，评估供应链本地化趋势。"
-        
-        # 市场表现
-        if 'market share' in text or 'marktanteil' in text:
-            return "市场份额变化反映竞争格局调整，需关注各品牌攻防态势。"
-        if 'sales' in text or 'verkauf' in text or 'absatz' in text:
-            return "销量数据波动显示市场需求变化，关注消费趋势与政策影响。"
-        
-        # 供应链/充电
-        if 'charging' in text or 'ladesäule' in text or 'infrastructure' in text:
-            return "充电基础设施布局加速，影响电动车使用便利性与市场接受度。"
-        if 'battery' in text or 'batterie' in text:
-            return "电池技术与供应链动态，关乎成本结构与供应安全。"
-        
-        # 默认：基于原文生成
-        summary = item.summary[:40] if len(item.summary) > 40 else item.summary
-        summary = re.sub(r'<[^>]+>', '', summary)
-        return f"{summary}（建议关注对出海策略的影响）"
 
 # ==================== 推送器 ====================
 
 class FeishuPusher:
     def __init__(self):
         self.webhook = Config.FEISHU_WEBHOOK
-        log(f"🔧 Webhook: {'已配置' if self.webhook else '未配置'}")
 
     def generate_summary(self, items):
         if not items:
-            return "今日暂无重大动态，市场平稳。"
+            return "过去24小时暂无重大动态，市场平稳。"
         
         parts = []
         dims = [i.dimension for i in items]
@@ -249,13 +354,12 @@ class FeishuPusher:
         if 'market' in dims:
             parts.append("市场数据值得关注")
         if 'supply_chain' in dims:
-            parts.append("供应链布局加速")
+            parts.append("供应链布局有新进展")
         
-        return "；".join(parts) + "，建议密切关注后续发展。" if parts else "欧洲车市动态更新，建议关注。"
+        time_range = f"（{Config.HOURS_BACK}小时内）"
+        return "；".join(parts) + "，建议密切关注后续发展。" + time_range if parts else "欧洲车市动态更新。"
 
     def send(self, items):
-        log(f"\n📤 准备推送: {len(items)} 条")
-        
         if not self.webhook:
             log("❌ Webhook未配置")
             return False
@@ -263,27 +367,33 @@ class FeishuPusher:
         today = datetime.now().strftime("%m月%d日")
         summary = self.generate_summary(items)
         
-        # 构建消息内容
         content_lines = [
             f"🤖 今日({today}) 德国汽车市场新闻 🔆",
             f"✍️ 总结：{summary}",
             ""
         ]
         
-        for i, item in enumerate(items[:8], 1):
-            content_lines.append(item.to_feishu_format(i))
+        if not items:
+            content_lines.append("📭 过去24小时内未监测到符合筛选条件的重要新闻。")
             content_lines.append("")
+            content_lines.append("💡 可能原因：")
+            content_lines.append("• 周末/节假日新闻更新较少")
+            content_lines.append("• 关键词过滤较为严格")
+            content_lines.append("• RSS源暂时无更新")
+        else:
+            for i, item in enumerate(items[:10], 1):  # 最多10条
+                content_lines.append(item.to_feishu_format(i))
+                content_lines.append("")
         
         content_lines.append("—")
-        content_lines.append("🕐 每日自动推送 | 🎯 聚焦出海战略")
+        content_lines.append("🕐 每日9:30自动推送 | 🎯 聚焦出海战略 | 📅 覆盖前24小时")
         
         full_content = "\n".join(content_lines)
         
-        # 打印预览
-        log("📋 内容预览:")
-        log("="*50)
-        log(full_content[:300] + "...")
-        log("="*50)
+        log("\n📋 最终内容:")
+        log("="*60)
+        log(full_content[:500] + "..." if len(full_content) > 500 else full_content)
+        log("="*60)
         
         card = {
             "msg_type": "interactive",
@@ -309,7 +419,6 @@ class FeishuPusher:
         }
         
         try:
-            log("🚀 发送中...")
             response = requests.post(
                 self.webhook,
                 json=card,
@@ -317,13 +426,11 @@ class FeishuPusher:
                 timeout=15
             )
             result = response.json()
-            log(f"📥 返回: {result}")
-            
             if result.get("code") == 0:
-                log("✅ 成功")
+                log("✅ 推送成功")
                 return True
             else:
-                log(f"❌ 失败: {result.get('msg')}")
+                log(f"❌ 失败: {result}")
                 return False
         except Exception as e:
             log(f"❌ 异常: {e}")
@@ -334,41 +441,46 @@ class FeishuPusher:
 class Monitor:
     def __init__(self):
         self.fetcher = NewsFetcher()
-        self.analyzer = SimpleAnalyzer()
+        self.analyzer = AIAnalyzer()
         self.pusher = FeishuPusher()
 
     def run(self):
         log("="*60)
-        log("🚀 德国汽车市场新闻监控启动")
+        log("🚀 德国汽车市场新闻监控")
+        log(f"⏰ 时间范围: 过去{Config.HOURS_BACK}小时")
+        log(f"🤖 AI: {Config.AI_PROVIDER}")
         log("="*60)
         
-        # 获取新闻
+        # 获取新闻（24小时内）
         items = self.fetcher.fetch_all()
         
         if not items:
-            log("⚠️ 无新闻，发送测试消息")
+            log("\n⚠️ 24小时内无新闻，发送空报告")
             self.pusher.send([])
             return
         
-        # 分析
-        log(f"\n🧠 分析 {len(items)} 条...")
+        # AI分析
+        log(f"\n🧠 AI分析 {len(items)} 条...")
+        analyzed_items = []
         for item in items:
-            self.analyzer.analyze(item)
-            log(f"  [{item.dimension}] {item.title[:40]}... | 摘要: {item.impact_summary[:30]}...")
+            analyzed_item = self.analyzer.analyze_with_ai(item)
+            analyzed_items.append(analyzed_item)
         
-        # 去重
-        seen_titles = set()
+        # 去重（标题相似）
+        seen = set()
         unique_items = []
-        for item in items:
-            title_key = item.title.lower()[:30]
-            if title_key not in seen_titles:
-                seen_titles.add(title_key)
+        for item in analyzed_items:
+            key = item.title.lower()[:25]
+            if key not in seen:
+                seen.add(key)
                 unique_items.append(item)
         
         log(f"\n📝 去重后: {len(unique_items)} 条")
         
-        # 排序并推送
-        unique_items.sort(key=lambda x: x.priority)
+        # 按优先级排序
+        unique_items.sort(key=lambda x: (x.priority, x.pub_datetime), reverse=True)
+        
+        # 推送
         self.pusher.send(unique_items)
         
         log("="*60)
