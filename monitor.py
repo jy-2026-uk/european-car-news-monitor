@@ -1,144 +1,81 @@
 import requests
-import feedparser
+from bs4 import BeautifulSoup
 import json
-import hashlib
 import os
 from datetime import datetime
 
-# 从环境变量读取配置
-FEISHU_WEBHOOK_URL = os.environ.get('FEISHU_WEBHOOK_URL')
-KEYWORDS = [
-    "European car", "EU automotive", "Volkswagen", "BMW", "Mercedes", 
-    "Audi", "Porsche", "Volvo", "Peugeot", "Renault", "Ferrari", 
-    "Lamborghini", "Stellantis", "EU auto industry", "European EV",
-    "electric vehicle Europe", "EU car market", "European automobile"
-]
+# 配置需要监控的源 (示例：以 InsideEVs 和 Auto Motor Sport 为例)
+SOURCES = {
+    "InsideEVs DE": "https://insideevs.de/rss/articles/all/",
+    "Auto Motor und Sport": "https://www.auto-motor-und-sport.de/service/rss/news.xml",
+    # 如果没有RSS，可以用直接解析HTML的方式，此处仅展示逻辑
+}
 
-RSS_FEEDS = [
-    "https://www.autonews.com/rss.xml",
-    "https://www.euronews.com/tag/automobile/rss",
-    "https://www.autocar.co.uk/rss",
-    "https://www.electrive.com/feed/",
-]
+class AutoMarketScraper:
+    def __init__(self, history_file='history.json'):
+        self.history_file = history_file
+        self.history = self.load_history()
 
-GOOGLE_NEWS_URLS = [
-    "https://news.google.com/rss/search?q=European+car+industry&hl=en-US&gl=US&ceid=US:en",
-    "https://news.google.com/rss/search?q=Volkswagen+BMW+Mercedes&hl=en-US&gl=US&ceid=US:en",
-]
+    def load_history(self):
+        if os.path.exists(self.history_file):
+            with open(self.history_file, 'r') as f:
+                return json.load(f)
+        return []
 
-class NewsMonitor:
-    def __init__(self):
-        self.history = set()
-    
-    def check_keywords(self, text):
-        text = text.lower()
-        return any(keyword.lower() in text for keyword in KEYWORDS)
-    
-    def fetch_rss(self, url):
-        try:
-            feed = feedparser.parse(url)
-            news_list = []
-            for entry in feed.entries[:5]:
-                news_list.append({
-                    "title": entry.get("title", ""),
-                    "link": entry.get("link", ""),
-                    "summary": entry.get("summary", "")[:100] + "...",
-                    "source": feed.feed.get("title", "未知来源")
-                })
-            return news_list
-        except Exception as e:
-            print(f"RSS错误: {e}")
-            return []
-    
-    def send_to_feishu(self, news):
-        try:
-            card = {
-                "msg_type": "interactive",
-                "card": {
-                    "config": {"wide_screen_mode": True},
-                    "header": {
-                        "title": {"tag": "plain_text", "content": "🚗 欧洲汽车新闻"},
-                        "template": "blue"
-                    },
-                    "elements": [
-                        {
-                            "tag": "div",
-                            "text": {"tag": "lark_md", "content": f"**{news['title']}**"}
-                        },
-                        {
-                            "tag": "div",
-                            "text": {"tag": "lark_md", "content": news['summary']}
-                        },
-                        {
-                            "tag": "div",
-                            "text": {"tag": "lark_md", "content": f"📰 {news['source']} | {datetime.now().strftime('%m-%d %H:%M')}"}
-                        },
-                        {
-                            "tag": "action",
-                            "actions": [{
-                                "tag": "button",
-                                "text": {"tag": "plain_text", "content": "阅读全文"},
-                                "type": "primary",
-                                "url": news['link']
-                            }]
-                        }
-                    ]
-                }
-            }
-            
-            response = requests.post(
-                FEISHU_WEBHOOK_URL,
-                json=card,
-                headers={"Content-Type": "application/json"},
-                timeout=10
-            )
-            return response.json().get("code") == 0
-        except Exception as e:
-            print(f"发送错误: {e}")
-            return False
-    
-    def run(self):
-        print(f"🔍 开始监控 - {datetime.now()}")
-        
-        all_news = []
-        
-        # 获取RSS
-        for url in RSS_FEEDS:
-            all_news.extend(self.fetch_rss(url))
-        
-        # 获取Google News
-        for url in GOOGLE_NEWS_URLS:
+    def save_history(self, new_url):
+        self.history.append(new_url)
+        # 只保留最近500条记录防止文件过大
+        with open(self.history_file, 'w') as f:
+            json.dump(self.history[-500:], f)
+
+    def get_dimension(self, title, content):
+        """简单的关键词分类逻辑，进阶版可接入LLM API"""
+        text = (title + content).lower()
+        if any(k in text for k in ['zoll', 'gesetz', 'subvention', 'förderung']): return "政策监管"
+        if any(k in text for k in ['vw', 'tesla', 'bmw', 'byd', 'rabatt']): return "竞品动态"
+        if any(k in text for k in ['zulassung', 'absatz', 'marktanteil']): return "市场表现"
+        return "品牌/其它"
+
+    def scrape(self):
+        reports = []
+        for name, url in SOURCES.items():
+            print(f"正在抓取: {name}...")
             try:
-                import time
-                time.sleep(1)
-                response = requests.get(url, timeout=10)
-                feed = feedparser.parse(response.content)
-                for entry in feed.entries[:3]:
-                    all_news.append({
-                        "title": entry.get("title", ""),
-                        "link": entry.get("link", ""),
-                        "summary": entry.get("summary", "")[:100] + "...",
-                        "source": "Google News"
-                    })
+                # 这里使用简单的RSS解析或Request解析
+                resp = requests.get(url, timeout=10)
+                soup = BeautifulSoup(resp.content, 'xml') # RSS 通常是 XML 格式
+                items = soup.find_all('item')[:5] # 每次取最新的5条
+                
+                for item in items:
+                    link = item.link.text
+                    title = item.title.text
+                    
+                    # --- 去重逻辑 ---
+                    if link in self.history:
+                        continue
+                    
+                    summary = item.description.text[:150] # 原始摘要
+                    dimension = self.get_dimension(title, summary)
+                    
+                    # 格式化输出
+                    report = f"**{len(reports)+1}. {title}**\n" \
+                             f"- 摘要：{summary[:50]}...\n" \
+                             f"- 维度：{dimension}\n" \
+                             f"- 来源：[{name}]({link})\n"
+                    
+                    reports.append(report)
+                    self.save_history(link)
             except Exception as e:
-                print(f"Google News错误: {e}")
+                print(f"抓取 {name} 出错: {e}")
         
-        print(f"📰 获取 {len(all_news)} 条新闻")
-        
-        sent = 0
-        for news in all_news:
-            if self.check_keywords(news['title'] + " " + news['summary']):
-                if self.send_to_feishu(news):
-                    sent += 1
-                    import time
-                    time.sleep(1)
-        
-        print(f"✅ 发送 {sent} 条新闻")
+        return "\n".join(reports)
 
 if __name__ == "__main__":
-    if not FEISHU_WEBHOOK_URL:
-        print("❌ 错误：未设置 FEISHU_WEBHOOK_URL")
-        exit(1)
-    
-    monitor = NewsMonitor()
-    monitor.run()
+    scraper = AutoMarketScraper()
+    content = scraper.scrape()
+    if content:
+        print("--- 今日情报 ---")
+        print(content)
+        # 这里可以加入发送企业微信/钉钉/邮件的代码
+    else:
+        print("今日无更新")
