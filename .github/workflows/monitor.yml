@@ -2,11 +2,8 @@ name: 欧洲汽车市场每日新闻监控
 
 on:
   schedule:
-    # 北京时间每天上午9点和下午6点运行 (UTC+8)
-    - cron: '0 1 * * *'   # UTC 01:00 = 北京 09:00
-    - cron: '0 10 * * *'  # UTC 10:00 = 北京 18:00
-  
-  # 允许手动触发
+    # 北京时间每天9:30（UTC 01:30）
+    - cron: '30 1 * * *'
   workflow_dispatch:
 
 jobs:
@@ -29,5 +26,5 @@ jobs:
     - name: 运行监控
       env:
         FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
-        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # 可选
+        DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       run: python monitor.py
