@@ -92,7 +92,7 @@ class Config:
         r'concept\s*car', r'auto\s*show\s*preview', r'render',
     ]
 
-# ==================== 数据结构 ====================
+# ==================== 数据结构（更新） ====================
 
 @dataclass
 class NewsItem:
@@ -109,14 +109,10 @@ class NewsItem:
     semantic_signature: str = ""
     
     def to_feishu_format(self, index: int) -> str:
-        """转换为飞书推送格式"""
+        """转换为指定格式"""
         return f"""{index}. {self.title}
-
-摘要：{self.impact_summary}
-
-维度：{Config.DIMENSIONS.get(self.dimension, '其他')}
-
-来源：{self.source_name}"""
+新闻摘要：{self.impact_summary}
+来源网站：[{self.source_name}]({self.link})"""
 
 # ==================== 智能去重引擎 ====================
 
@@ -423,11 +419,46 @@ class NewsFetcher:
         print(f"📰 原始获取: {len(all_items)} 条")
         return all_items
 
-# ==================== 飞书推送器 ====================
+# ==================== 飞书推送器（更新） ====================
 
 class FeishuPusher:
     def __init__(self):
         self.webhook = Config.FEISHU_WEBHOOK
+    
+    def generate_daily_summary(self, items: List[NewsItem]) -> str:
+        """生成每日一句话总结"""
+        # 统计各维度数量
+        dim_count = defaultdict(int)
+        for item in items:
+            dim_count[item.dimension] += 1
+        
+        # 提取关键信息生成总结
+        summary_parts = []
+        
+        # 检查是否有重大政策
+        policy_items = [i for i in items if i.dimension == 'policy']
+        if policy_items:
+            summary_parts.append("政策层面有新动态")
+        
+        # 检查中国品牌表现
+        china_items = [i for i in items if any(x in i.raw_content for x in ['byd', 'nio', 'xpeng', 'chinese'])]
+        if china_items:
+            summary_parts.append("中国品牌动作频频")
+        
+        # 检查市场数据
+        market_items = [i for i in items if i.dimension == 'market']
+        if market_items:
+            summary_parts.append("市场数据值得关注")
+        
+        # 检查竞品重大调整
+        competitor_items = [i for i in items if i.dimension == 'competitor' and any(x in i.raw_content for x in ['layoff', 'factory', 'restructuring'])]
+        if competitor_items:
+            summary_parts.append("传统车企调整加速")
+        
+        if not summary_parts:
+            return "欧洲车市动态平稳，建议持续关注政策走向与竞品策略。"
+        
+        return "；".join(summary_parts) + "，建议密切关注后续发展。"
     
     def send(self, items: List[NewsItem]) -> bool:
         """推送新闻列表"""
@@ -439,23 +470,30 @@ class FeishuPusher:
             print("❌ 未配置Webhook")
             return False
         
-        # 构建消息
-        header = f"🚗 **欧洲汽车市场每日新闻**\n📅 {datetime.now().strftime('%Y-%m-%d')}\n🔍 共筛选出 {len(items)} 条重要动态\n"
+        # 生成每日总结
+        daily_summary = self.generate_daily_summary(items)
         
-        content_parts = [header]
+        # 构建消息内容
+        today = datetime.now().strftime("%m月%d日")
         
-        for i, item in enumerate(items[:10], 1):  # 最多10条
-            content_parts.append(item.to_feishu_format(i))
-            content_parts.append("")  # 空行分隔
+        content_lines = [
+            f"🤖 今日({today}) 德国汽车市场新闻 🔆",
+            f"✍️ 总结：{daily_summary}",
+            ""
+        ]
+        
+        # 添加新闻列表（最多8条）
+        for i, item in enumerate(items[:8], 1):
+            content_lines.append(item.to_feishu_format(i))
+            content_lines.append("")  # 空行分隔
         
         # 添加页脚
-        content_parts.append("—")
-        content_parts.append("💡 数据来源：Automobilwoche, ACEA, Auto Motor und Sport等权威媒体")
-        content_parts.append("🤖 本消息由AI新闻监控系统自动生成")
+        content_lines.append("—")
+        content_lines.append("🕐 每日自动推送 | 🎯 聚焦出海战略")
         
-        full_content = "\n".join(content_parts)
+        full_content = "\n".join(content_lines)
         
-        # 构建卡片
+        # 构建飞书卡片
         card = {
             "msg_type": "interactive",
             "card": {
@@ -463,7 +501,7 @@ class FeishuPusher:
                 "header": {
                     "title": {
                         "tag": "plain_text",
-                        "content": f"欧洲汽车市场日报 {datetime.now().strftime('%m/%d')}"
+                        "content": f"德国汽车市场日报 {today}"
                     },
                     "template": "blue"
                 },
