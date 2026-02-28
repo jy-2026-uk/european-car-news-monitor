@@ -1,9 +1,10 @@
-name: European Car News Monitor
+name: 欧洲汽车市场每日新闻监控
 
 on:
   schedule:
-    # 每2小时运行一次（UTC时间，北京时间+8）
-    - cron: '0 */2 * * *'
+    # 北京时间每天上午9点和下午6点运行 (UTC+8)
+    - cron: '0 1 * * *'   # UTC 01:00 = 北京 09:00
+    - cron: '0 10 * * *'  # UTC 10:00 = 北京 18:00
   
   # 允许手动触发
   workflow_dispatch:
@@ -13,19 +14,20 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
+    - name: 检出代码
       uses: actions/checkout@v3
     
-    - name: Set up Python
+    - name: 设置Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.10'
     
-    - name: Install dependencies
+    - name: 安装依赖
       run: |
         pip install requests feedparser
     
-    - name: Run monitor
+    - name: 运行监控
       env:
         FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # 可选
       run: python monitor.py
