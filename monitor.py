@@ -12,26 +12,22 @@ import sys
 
 @dataclass
 class Config:
-    # 飞书与AI配置
     FEISHU_WEBHOOK = os.environ.get('FEISHU_WEBHOOK_URL', '')
     DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', '')
     AI_PROVIDER = 'deepseek'
     
-    # 核心关键词：分为三个维度，确保信息高度相关
+    # 战略关键词 (含德语核心词)
     KEYWORDS_STRATEGIC = [
-        # 1. 小米专属 (最高优先级)
-        'xiaomi', 'su7', 'lei jun', 'lu weibing', 'xiaomi auto',
-        # 2. 核心竞品动态
+        'xiaomi', 'su7', 'lei jun', 'xiaomi auto',
         'tesla', 'model 3', 'model y', 'porsche', 'taycan', 'byd', 'nio', 'xpeng', 'zeekr',
-        # 3. 准入与壁垒 (战略关注点)
-        'tariff', 'anti-subsidy', 'eu commission', 'regulation', 'euro ncap', 
-        'homologation', 'charging standard', 'market entry', 'germany'
+        'tariff', 'zoll', 'anti-subsidy', 'subvention', 'eu commission', 'euro ncap', 
+        'homologation', 'market entry', 'germany', 'deutschland', 'beijing auto'
     ]
     
-    # 严禁干扰：彻底剔除之前出现的“大巴”、“印度”等噪音
+    # 噪声过滤 (排除大巴、货车、无关地区)
     EXCLUDE_PATTERNS = [
         r'bus', r'coach', r'truck', r'lorry', r'india', r'puducherry', 
-        r'formula\s*1', r'racing', r'motorsport', r'crash\s*test'
+        r'formula\s*1', r'racing', r'motorsport', r'bike', r'bicycle'
     ]
 
 # ==================== 核心逻辑 ====================
@@ -43,27 +39,25 @@ class AIAnalyzer:
     def __init__(self):
         self.api_key = Config.DEEPSEEK_API_KEY
 
-    def analyze_for_management(self, item):
+    def analyze_factual(self, item):
         if not self.api_key: return self._rule_fallback(item)
         
-        # 针对小米管理层的深度Prompt
-        prompt = f"""你现在是小米汽车出海战略智库的首席分析师。
-请评估以下新闻对【小米汽车（Xiaomi Auto）】进入欧洲（尤其是德国）市场的战略意义。
+        prompt = f"""你是一位专业的全球汽车产业情报员。
+请为管理层简报提供最客观、干练的新闻提炼。
 
 新闻标题：{item['title']}
 来源：{item['source']}
-内容：{item['summary'][:1000]}
+内容：{item['summary'][:1200]}
 
 任务：
-1. 翻译标题：加粗处理，格式为 **[英文原标题]** \n **[中文翻译标题]**。
-2. 战略内参：提取100字以内的干货，必须包含：(1)核心事实；(2)对小米进入欧洲的直接影响；(3)给管理层的动作建议。
-3. 严禁废话：不要说“这反映了...”，直接说“小米应...”或“此举将导致...”。
+1. 翻译标题：必须加粗，格式为 **[英文/德文原标题]** \n **[中文翻译标题]**。
+2. 新闻摘要：用两到三句话陈述核心事实，以及该动态对行业格局/政策环境的客观影响。
+3. 严格准则：禁止提供任何行动建议（严禁出现“小米应该...”、“管理层需...”）。禁止带主观感情色彩。只陈述，不评价。
 
-请以严格JSON格式返回：
+请以JSON格式返回：
 {{
-  "formatted_title": "**英文标题**\\n**中文标题**",
-  "dimension": "policy/competitor/market/brand",
-  "strategic_insight": "【战略内参】(内容)"
+  "formatted_title": "**原标题**\\n**中文标题**",
+  "news_summary": "【新闻摘要】(内容)"
 }}
 """
         try:
@@ -73,7 +67,7 @@ class AIAnalyzer:
                 json={
                     "model": "deepseek-chat",
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.2
+                    "temperature": 0.1
                 },
                 timeout=30
             )
@@ -86,48 +80,52 @@ class AIAnalyzer:
     def _rule_fallback(self, item):
         return {
             "formatted_title": f"**{item['title']}**",
-            "dimension": "other",
-            "strategic_insight": f"【战略内参】该动态涉及欧洲市场准入/竞争，建议管理层关注其对SU7定价及当地合规性的潜在影响。"
+            "news_summary": f"【新闻摘要】监测到涉及欧洲/全球市场的行业动态，源自 {item['source']}。"
         }
 
 class StrategyMonitor:
     def __init__(self):
         self.analyzer = AIAnalyzer()
-        # 确定时间窗口（北京时间昨天09:30 - 今天09:30）
         now = datetime.utcnow() + timedelta(hours=8)
         self.end_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
         self.start_time = self.end_time - timedelta(days=1)
 
     def fetch_news(self):
+        # 扩展后的权威信源池
         sources = {
+            'Handelsblatt (德报)': 'https://www.handelsblatt.com/contentexpo/feed/unternehmen',
+            'Manager Magazin (德)': 'https://www.manager-magazin.de/unternehmen/index.rss',
+            'Automotive News Europe': 'https://europe.autonews.com/rss/all-news', # 如果RSS失效需用Jina爬取
             'Electrive': 'https://www.electrive.com/feed/',
-            'Automobilwoche': 'https://www.automobilwoche.de/rss.xml',
-            'ACEA': 'https://www.acea.auto/feed/'
+            'ACEA (欧汽协)': 'https://www.acea.auto/feed/',
+            'Automobilwoche': 'https://www.automobilwoche.de/rss.xml'
         }
         
         valid_news = []
         for name, url in sources.items():
             log(f"正在扫描: {name}")
-            feed = feedparser.parse(url)
-            for entry in feed.entries:
-                # 过滤逻辑：时间、关键词、排除项
-                title = entry.get('title', '').lower()
-                summary = entry.get('summary', '').lower()
-                
-                # 1. 排除干扰项 (排除印度、大巴等)
-                if any(re.search(p, title + summary) for p in Config.EXCLUDE_PATTERNS):
-                    continue
-                
-                # 2. 关键词匹配 (必须包含核心词)
-                if not any(kw in (title + summary) for kw in Config.KEYWORDS_STRATEGIC):
-                    continue
-                
-                valid_news.append({
-                    'title': entry.title,
-                    'link': entry.link,
-                    'summary': entry.summary,
-                    'source': name
-                })
+            try:
+                feed = feedparser.parse(url)
+                for entry in feed.entries:
+                    title = entry.get('title', '').lower()
+                    summary = entry.get('summary', '').lower()
+                    
+                    # 1. 噪声过滤
+                    if any(re.search(p, title + summary) for p in Config.EXCLUDE_PATTERNS):
+                        continue
+                    
+                    # 2. 战略词匹配
+                    if not any(kw in (title + summary) for kw in Config.KEYWORDS_STRATEGIC):
+                        continue
+                    
+                    valid_news.append({
+                        'title': entry.title,
+                        'link': entry.link,
+                        'summary': entry.summary,
+                        'source': name
+                    })
+            except Exception as e:
+                log(f"源 {name} 获取失败: {e}")
         return valid_news
 
     def push_to_feishu(self, results):
@@ -136,34 +134,37 @@ class StrategyMonitor:
         today = datetime.now().strftime("%m月%d日")
         elements = [{
             "tag": "div",
-            "text": {"tag": "lark_md", "content": f"🎯 **小米汽车出海战略内参 | {today}**\n*聚焦欧洲准入、竞品对标与德国市场动向*\n---"}
+            "text": {"tag": "lark_md", "content": f"📊 **小米汽车全球市场早报 | {today}**\n---\n*注：本报汇总过去24h全球权威媒体关于汽车产业、准入政策及竞品之核心动态。*"}
         }]
 
-        for i, res in enumerate(results[:8]): # 只选最精华的8条
-            analysis = self.analyzer.analyze_for_management(res)
+        # 排序：小米相关优先展示
+        results.sort(key=lambda x: any(kw in x['title'].lower() for kw in ['xiaomi', 'su7']), reverse=True)
+
+        for i, res in enumerate(results[:12]): # 增加到12条以覆盖更多信源
+            analysis = self.analyzer.analyze_factual(res)
             elements.append({
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"{i+1}. {analysis['formatted_title']}\n{analysis['strategic_insight']}\n🔗 [原文链接]({res['link']}) | 来源: {res['source']}\n"
+                    "content": f"{i+1}. {analysis['formatted_title']}\n{analysis['news_summary']}\n🔗 [阅读详情]({res['link']}) | 来源: {res['source']}\n"
                 }
             })
 
         payload = {
             "msg_type": "interactive",
             "card": {
-                "header": {"title": {"tag": "plain_text", "content": f"小米汽车全球市场早报"}, "template": "orange"},
+                "header": {"title": {"tag": "plain_text", "content": f"汽车全球市场情报简报"}, "template": "blue"},
                 "elements": elements
             }
         }
-        requests.post(Config.FEISHU_WEBHOOK, json=payload)
+        requests.post(Config.FEISHU_WEBHOOK, json=payload, timeout=15)
 
     def run(self):
-        log("🚀 启动战略监控程序...")
+        log("🚀 启动全球信源监控...")
         news = self.fetch_news()
-        log(f"找到 {len(news)} 条战略相关新闻")
+        log(f"过滤后获得 {len(news)} 条高价值情报")
         self.push_to_feishu(news)
-        log("✅ 任务完成")
+        log("✅ 简报推送完成")
 
 if __name__ == "__main__":
     StrategyMonitor().run()
