@@ -2,7 +2,7 @@ name: 欧洲汽车市场每日新闻监控
 
 on:
   schedule:
-    # 北京时间每天9:30（UTC 01:30）
+    # 北京时间每天9:30
     - cron: '30 1 * * *'
   workflow_dispatch:
 
