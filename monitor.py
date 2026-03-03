@@ -17,8 +17,8 @@ class Config:
     FEISHU_WEBHOOK = os.environ.get('FEISHU_WEBHOOK_URL', '')
     DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', '')
     AI_PROVIDER = 'deepseek'
-    HOURS_BACK = 24
-    
+    # 固定24小时，但计算精确的昨天9:30到今天9:30
+
     KEYWORDS_CORE = [
         'tariff', 'zoll', 'subsid', 'regulation', 'verordnung',
         'anti-subsidy', 'anti-dumping', 'import duty',
@@ -29,7 +29,11 @@ class Config:
         'layoff', 'entlassung', 'restructuring', 'factory', 'werk',
         'market share', 'marktanteil', 'sales', 'verkauf',
         'production', 'joint venture', 'partnership',
-        'battery', 'charging', 'europe', 'eu', 'german', 'deutschland', 'uk'
+        'battery', 'charging', 'europe', 'eu', 'german', 'deutschland', 'uk',
+        'rescue plan', 'emission target', 'co2 target', 'bev target',
+        'zero emission', 'climate target', 'automotive industry',
+        'european commission', 'von der leyen', 'acea',
+        'carmaker', 'automaker', 'vehicle', 'electric vehicle'
     ]
     EXCLUDE_PATTERNS = [
         r'formula\s*1', r'f1', r'racing', r'motorsport',
@@ -98,7 +102,7 @@ class AIAnalyzer:
             jina_url = f"https://r.jina.ai/http://{url.replace('https://', '').replace('http://', '')}"
             response = requests.get(jina_url, timeout=10)
             if response.status_code == 200:
-                content = response.text[:1500]
+                content = response.text[:2000]
                 return content
         except Exception as e:
             log(f"  ⚠️ 全文获取失败: {e}")
@@ -120,22 +124,22 @@ class AIAnalyzer:
         
         content = item.full_content if item.full_content else item.summary
         
-        # 优化后的提示词：要求翻译标题 + 完整摘要（不严格限50字）
+        # 优化后的提示词：不限制字数，优先完整
         prompt = f"""你是一位专业的欧洲汽车产业分析师，专注于中国品牌出海战略研究。
 
 请分析以下英文新闻，完成两个任务：
-1. 将英文标题翻译成简洁准确的中文标题
+1. 将英文标题翻译成简洁准确的中文标题（放在原标题下方）
 2. 提取核心事实并评估对中国汽车品牌出海的影响
 
 新闻标题：{item.title}
 新闻来源：{item.source_name}
-新闻内容：{content[:1200]}
+新闻内容：{content[:1500]}
 
 请严格按照以下JSON格式返回：
 {{
-  "title_cn": "中文标题（简洁准确，15-25字）",
+  "title_cn": "中文标题（简洁准确，15-30字）",
   "dimension": "policy/competitor/market/brand/supply_chain/other",
-  "impact_summary": "影响摘要（尽量控制在50字左右，可适当超出，但必须语义完整，直接点明核心事实及对中国出海的潜在影响）",
+  "impact_summary": "影响摘要（50-100字，优先保证语义完整，直接点明核心事实及对中国出海的潜在影响，不要截断句子）",
   "key_entities": ["涉及的关键公司/品牌"],
   "importance_score": 1-10
 }}
@@ -147,23 +151,23 @@ class AIAnalyzer:
 - brand: 中国品牌动态、深度测评、重大负面
 - supply_chain: 充电网络、电池、原材料等供应链
 
-影响摘要要求：
-- 尽量控制在50字左右，可适当超出（60字以内），但必须语义完整
+影响摘要要求（重要）：
+- 字数50-100字左右，但优先保证语义完整
+- 必须是一句或几句完整的话，不要截断
 - 直接点明核心事实
 - 明确指出对中国品牌出海的潜在影响
-- 具体、actionable，不要泛泛而谈
-- 不要截断句子，必须完整"""
+- 具体、actionable，不要泛泛而谈"""
 
         try:
             result = self._call_deepseek(prompt)
-            log(f"  🤖 AI返回: {result[:150]}...")
+            log(f"  🤖 AI返回: {result[:200]}...")
             
             # 解析JSON
             json_match = re.search(r'\{.*\}', result, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group())
                 
-                # 设置中文标题
+                # 设置中文标题（合并到title）
                 title_cn = data.get('title_cn', '')
                 if title_cn and title_cn != item.title:
                     item.title = f"{item.title}\n{title_cn}"
@@ -171,19 +175,20 @@ class AIAnalyzer:
                 # 设置维度
                 item.dimension = data.get('dimension', 'other')
                 
-                # 设置摘要（不严格截断，确保完整）
+                # 设置摘要（不截断，保持完整）
                 raw_summary = data.get('impact_summary', '')
                 # 清理可能的截断符号
                 raw_summary = re.sub(r'\.\.\.$', '。', raw_summary)
                 raw_summary = re.sub(r'…$', '。', raw_summary)
-                item.impact_summary = raw_summary[:65]  # 放宽到65字，但保留完整句子
+                # 不限制字数，保持完整
+                item.impact_summary = raw_summary
                 
                 # 验证
-                if len(item.impact_summary) < 10:
+                if len(item.impact_summary) < 20:
                     log(f"  ⚠️ AI摘要太短，使用规则")
                     item = self.analyze_with_rules(item)
                 else:
-                    log(f"  ✨ AI成功: [{item.dimension}] {item.impact_summary[:40]}...")
+                    log(f"  ✨ AI成功: [{item.dimension}] {len(item.impact_summary)}字")
             else:
                 log(f"  ⚠️ 未找到JSON，使用规则")
                 item = self.analyze_with_rules(item)
@@ -207,7 +212,7 @@ class AIAnalyzer:
                     "model": "deepseek-chat",
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.3,
-                    "max_tokens": 800
+                    "max_tokens": 1000
                 },
                 timeout=30
             )
@@ -249,9 +254,9 @@ class AIAnalyzer:
             else:
                 item.dimension = 'other'
             
-            # 生成摘要（规则版，尽量完整）
-            if 'german chancellor' in text and 'hangzhou' in text:
-                item.impact_summary = "德国总理访华考察零跑汽车，释放中德汽车产业合作积极信号，有利于中国新能源车企通过技术合作加速出海布局。"
+            # 生成完整摘要（规则版）
+            if 'german' in text and 'china' in text and ('tie' in text or 'relationship' in text):
+                item.impact_summary = "德国主流车企公开重申对中国市场的承诺与紧密合作关系。此举可能巩固其在华地位，间接提升中国市场竞争烈度，为中国品牌出海提供合作机遇的同时也带来更大竞争压力。"
             elif 'catl' in text and 'bmw' in text:
                 item.impact_summary = "宁德时代与宝马合作推进电池护照合规，中国供应链企业技术绑定欧洲车企，有利于维持配套资格并深化出海布局。"
             elif has_china:
@@ -261,7 +266,7 @@ class AIAnalyzer:
             elif 'battery' in text:
                 item.impact_summary = "电池供应链动态变化，关乎成本结构与供应安全，需评估对生产计划及竞争力的潜在影响。"
             else:
-                summary = item.summary[:50] if len(item.summary) > 50 else item.summary
+                summary = item.summary[:80] if len(item.summary) > 80 else item.summary
                 summary = re.sub(r'<[^>]+>', '', summary)
                 item.impact_summary = f"{summary}（建议关注对出海策略的影响）"
             
@@ -272,7 +277,7 @@ class AIAnalyzer:
         
         return item
 
-# ==================== 新闻获取器 ====================
+# ==================== 新闻获取器（修复时间窗口） ====================
 
 class NewsFetcher:
     def __init__(self):
@@ -281,24 +286,59 @@ class NewsFetcher:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         self.time_parser = TimeParser()
-        self.cutoff_time = datetime.now() - timedelta(hours=Config.HOURS_BACK)
         
-        self.sources = {
+        # 关键修复：计算精确的24小时窗口（昨天9:30到今天9:30，北京时间）
+        now_utc = datetime.utcnow()
+        now_beijing = now_utc + timedelta(hours=8)
+        
+        # 今天的9:30（北京时间）
+        today_930_beijing = now_beijing.replace(hour=9, minute=30, second=0, microsecond=0)
+        
+        # 如果现在已经过了9:30，今天的9:30就是截止时间，昨天9:30是开始时间
+        # 如果还没到9:30，昨天的9:30是截止时间，前天9:30是开始时间
+        if now_beijing >= today_930_beijing:
+            self.end_time_beijing = today_930_beijing
+            self.start_time_beijing = today_930_beijing - timedelta(days=1)
+        else:
+            self.end_time_beijing = today_930_beijing - timedelta(days=1)
+            self.start_time_beijing = today_930_beijing - timedelta(days=2)
+        
+        # 转换为UTC（RSS时间通常是UTC）
+        self.start_time_utc = self.start_time_beijing - timedelta(hours=8)
+        self.end_time_utc = self.end_time_beijing - timedelta(hours=8)
+        
+        log(f"⏰ 时间窗口（北京）: {self.start_time_beijing.strftime('%Y-%m-%d %H:%M')} ~ {self.end_time_beijing.strftime('%Y-%m-%d %H:%M')}")
+        log(f"   时间窗口（UTC）: {self.start_time_utc.strftime('%Y-%m-%d %H:%M')} ~ {self.end_time_utc.strftime('%Y-%m-%d %H:%M')}")
+        
+        # RSS源
+        self.rss_sources = {
             'automobilwoche': 'https://www.automobilwoche.de/rss.xml',
             'acea': 'https://www.acea.auto/feed/',
             'electrive': 'https://www.electrive.com/feed/',
             'auto_motor_sport': 'https://www.auto-motor-und-sport.de/rss/feed.xml',
+        }
+        
+        # Google News搜索
+        self.google_sources = {
             'google_german': 'https://news.google.com/rss/search?q=German+automotive+industry&hl=en&gl=DE&ceid=DE:en',
             'google_china_eu': 'https://news.google.com/rss/search?q=China+EV+Europe+tariff&hl=en&gl=DE&ceid=DE:en',
+            'google_eu_policy': 'https://news.google.com/rss/search?q=EU+automotive+policy+emission&hl=en&gl=DE&ceid=DE:en',
         }
 
-    def is_recent(self, pub_date: str) -> bool:
+    def is_in_window(self, pub_date: str) -> bool:
+        """检查是否在昨天9:30到今天9:30之间"""
         try:
             pub_dt = self.time_parser.parse(pub_date)
+            
+            # 统一转换为无时区
             if pub_dt.tzinfo:
                 pub_dt = pub_dt.replace(tzinfo=None)
-            return pub_dt >= self.cutoff_time
-        except:
+            
+            # 检查是否在时间窗口内
+            return self.start_time_utc <= pub_dt <= self.end_time_utc
+            
+        except Exception as e:
+            log(f"  ⚠️ 时间解析失败: {e}, 默认保留")
             return True
 
     def should_exclude(self, title, summary):
@@ -348,18 +388,19 @@ class NewsFetcher:
             feed = feedparser.parse(url)
             log(f"  原始条目: {len(feed.entries)}")
             
-            recent_count = 0
-            for entry in feed.entries[:15]:
+            in_window_count = 0
+            for entry in feed.entries[:20]:
                 try:
                     title = entry.get('title', '')
-                    summary = entry.get('summary', '')[:400]
+                    summary = entry.get('summary', '')[:500]
                     link = entry.get('link', '')
                     published = entry.get('published', '')
                     
-                    if not self.is_recent(published):
+                    # 时间窗口过滤（精确的24小时）
+                    if not self.is_in_window(published):
                         continue
                     
-                    recent_count += 1
+                    in_window_count += 1
                     
                     if self.should_exclude(title, summary):
                         continue
@@ -381,28 +422,94 @@ class NewsFetcher:
                     log(f"  ⚠️ 单条处理失败: {e}")
                     continue
             
-            log(f"  24h内: {recent_count} | 通过: {len(items)}")
+            log(f"  窗口内: {in_window_count} | 通过筛选: {len(items)}")
                 
         except Exception as e:
             log(f"❌ 源失败 {name}: {e}")
         
         return items
 
-    def fetch_all(self):
+    def fetch_google_news(self):
+        """获取Google News作为补充"""
         all_items = []
-        for name, url in self.sources.items():
+        for name, url in self.google_sources.items():
+            try:
+                log(f"📡 获取: {name}")
+                response = requests.get(url, timeout=15, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                })
+                feed = feedparser.parse(response.content)
+                log(f"  原始条目: {len(feed.entries)}")
+                
+                count = 0
+                for entry in feed.entries[:10]:
+                    try:
+                        title = entry.get('title', '')
+                        summary = entry.get('summary', '')[:500]
+                        link = entry.get('link', '')
+                        published = entry.get('published', '')
+                        
+                        # 时间窗口过滤
+                        if not self.is_in_window(published):
+                            continue
+                        
+                        # 关键词检查
+                        text = (title + " " + summary).lower()
+                        if not any(kw in text for kw in Config.KEYWORDS_CORE):
+                            continue
+                        
+                        item = NewsItem(
+                            title=title,
+                            link=link,
+                            summary=summary,
+                            source_name='Google News',
+                            published=published,
+                            pub_datetime=self.time_parser.parse(published),
+                            priority=5
+                        )
+                        all_items.append(item)
+                        count += 1
+                    except:
+                        continue
+                
+                log(f"  通过: {count} 条")
+            except Exception as e:
+                log(f"❌ Google News失败 {name}: {e}")
+        
+        return all_items
+
+    def fetch_all(self):
+        # 先获取RSS源
+        all_items = []
+        for name, url in self.rss_sources.items():
             try:
                 items = self.fetch_rss(name, url)
                 all_items.extend(items)
             except Exception as e:
                 log(f"❌ 源异常 {name}: {e}")
         
+        rss_count = len(all_items)
+        log(f"\n📊 RSS总计: {rss_count} 条")
+        
+        # 如果RSS源新闻太少（少于2条），补充Google News
+        if rss_count < 2:
+            log(f"\n⚠️ RSS源新闻较少，补充Google News...")
+            google_items = self.fetch_google_news()
+            
+            # 去重（避免与RSS重复）
+            existing_links = {item.link for item in all_items}
+            for item in google_items:
+                if item.link not in existing_links:
+                    all_items.append(item)
+            
+            log(f"📊 补充后总计: {len(all_items)} 条")
+        
+        # 排序（最新的在前）
         try:
             all_items.sort(key=lambda x: x.pub_datetime, reverse=True)
         except:
             pass
         
-        log(f"\n📊 总计(24h): {len(all_items)} 条")
         return all_items
 
 # ==================== 推送器 ====================
@@ -446,12 +553,12 @@ class FeishuPusher:
             ]
             
             if not items:
-                content_lines.append("📭 过去24小时内未监测到符合筛选条件的重要新闻。")
+                content_lines.append("📭 过去24小时内新闻更新较少。")
                 content_lines.append("")
                 content_lines.append("💡 可能原因：")
                 content_lines.append("• 周末/节假日新闻更新较少")
-                content_lines.append("• 关键词过滤较为严格")
-                content_lines.append("• RSS源暂时无更新")
+                content_lines.append("• 重要新闻正在发酵中")
+                content_lines.append("• 建议关注后续更新")
             else:
                 for i, item in enumerate(items[:10], 1):
                     content_lines.append(item.to_feishu_format(i))
@@ -520,55 +627,51 @@ class Monitor:
         try:
             log("="*60)
             log("🚀 德国汽车市场新闻监控")
-            log(f"⏰ 时间范围: 过去{Config.HOURS_BACK}小时")
             log(f"🤖 AI: {Config.AI_PROVIDER if Config.DEEPSEEK_API_KEY else '规则模式'}")
             log("="*60)
             
             # 获取新闻
             items = self.fetcher.fetch_all()
             
-            if not items:
-                log("\n⚠️ 无新闻，发送空报告")
-                self.pusher.send([])
-                log("="*60)
-                log("✅ 完成")
-                log("="*60)
-                return
-            
             # AI分析
-            log(f"\n🧠 分析 {len(items)} 条...")
-            analyzed_items = []
-            for i, item in enumerate(items):
+            if items:
+                log(f"\n🧠 分析 {len(items)} 条...")
+                analyzed_items = []
+                for i, item in enumerate(items):
+                    try:
+                        log(f"  [{i+1}/{len(items)}] {item.title[:40]}...")
+                        analyzed_item = self.analyzer.analyze_with_ai(item)
+                        analyzed_items.append(analyzed_item)
+                    except Exception as e:
+                        log(f"  ❌ 分析失败: {e}")
+                        analyzed_items.append(self.analyzer.analyze_with_rules(item))
+                
+                # 去重
                 try:
-                    log(f"  [{i+1}/{len(items)}] {item.title[:40]}...")
-                    analyzed_item = self.analyzer.analyze_with_ai(item)
-                    analyzed_items.append(analyzed_item)
+                    seen = set()
+                    unique_items = []
+                    for item in analyzed_items:
+                        key = item.title.lower()[:25]
+                        if key not in seen:
+                            seen.add(key)
+                            unique_items.append(item)
+                    log(f"\n📝 去重后: {len(unique_items)} 条")
                 except Exception as e:
-                    log(f"  ❌ 分析失败: {e}")
-                    analyzed_items.append(self.analyzer.analyze_with_rules(item))
-            
-            # 去重
-            try:
-                seen = set()
-                unique_items = []
-                for item in analyzed_items:
-                    key = item.title.lower()[:25]
-                    if key not in seen:
-                        seen.add(key)
-                        unique_items.append(item)
-                log(f"\n📝 去重后: {len(unique_items)} 条")
-            except Exception as e:
-                log(f"⚠️ 去重失败，使用全部: {e}")
-                unique_items = analyzed_items
-            
-            # 排序
-            try:
-                unique_items.sort(key=lambda x: (x.priority, x.pub_datetime), reverse=True)
-            except:
-                pass
-            
-            # 推送
-            self.pusher.send(unique_items)
+                    log(f"⚠️ 去重失败，使用全部: {e}")
+                    unique_items = analyzed_items
+                
+                # 排序
+                try:
+                    unique_items.sort(key=lambda x: (x.priority, x.pub_datetime), reverse=True)
+                except:
+                    pass
+                
+                # 推送
+                self.pusher.send(unique_items)
+            else:
+                # 即使没有新闻也推送（显示提示）
+                log("\n⚠️ 无新闻，发送提示")
+                self.pusher.send([])
             
             log("="*60)
             log("✅ 完成")
