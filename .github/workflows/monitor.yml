@@ -2,29 +2,67 @@ name: 欧洲汽车市场每日新闻监控
 
 on:
   schedule:
-    # 北京时间每天9:30
-    - cron: '30 1 * * *'
+    # 兜底：北京时间 08:30 / 09:30 / 10:30（GitHub Actions cron 按 UTC）
+    - cron: "30 0,1,2 * * *"
   workflow_dispatch:
 
+# 防并发：同一时间只跑一个，避免重复推送
+concurrency:
+  group: european-car-news-monitor
+  cancel-in-progress: true
+
+# 允许把 state/last_sent.txt 提交回仓库（用于“当天只发一次”）
+permissions:
+  contents: write
+
 jobs:
-  monitor:
+  run-monitor:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: 检出代码
-      uses: actions/checkout@v3
-    
-    - name: 设置Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
-    
-    - name: 安装依赖
-      run: |
-        pip install requests feedparser
-    
-    - name: 运行监控
-      env:
-        FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
-        DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-      run: python monitor.py
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 如果你有 requirements.txt，会优先用它；否则用你目前的依赖
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests feedparser
+          fi
+
+      - name: Run monitor
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          python monitor.py
+
+      - name: Commit state (last sent date)
+        if: success()
+        run: |
+          # 只有当 state 文件被更新时才提交，避免无意义 commit
+          if [ ! -f state/last_sent.txt ]; then
+            echo "No state file found, skip commit."
+            exit 0
+          fi
+
+          if [ -z "$(git status --porcelain state/last_sent.txt)" ]; then
+            echo "State not changed, skip commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state/last_sent.txt
+          git commit -m "chore: update last sent date"
+          git push
