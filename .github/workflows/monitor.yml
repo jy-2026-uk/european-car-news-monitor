@@ -2,8 +2,8 @@ name: 欧洲汽车市场每日新闻监控
 
 on:
   schedule:
-    # 兜底：北京时间 08:30 / 09:30 / 10:30（GitHub Actions cron 按 UTC）
-    - cron: "30 0,1,2 * * *"
+    # 北京时间 07:00 / 08:00 / 09:00
+    - cron: "0 23,0,1 * * *"
   workflow_dispatch:
 
 # 防并发：同一时间只跑一个，避免重复推送
